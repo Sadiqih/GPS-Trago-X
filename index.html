@@ -8,7 +8,7 @@
   <!-- MQTT Client -->
   <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 
-  <!-- Leaflet Map (OpenStreetMap) -->
+  <!-- Leaflet Map -->
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
@@ -18,12 +18,9 @@
   <style>
     html, body {
       margin: 0;
-      box-shadow: 0 0 20px rgba(0, 180, 255, 0.4);
-      border-radius: 15px;
       padding: 0;
-      outline: none;
       height: 100%;
-      background: #001a3f;
+      background: radial-gradient(circle at center, #001f5c, #00081a);
       overflow: hidden;
     }
 
@@ -36,25 +33,31 @@
       position: absolute;
       top: 10px;
       left: 10px;
-      background: rgba(0, 20, 40, 0.8);
+      background: rgba(0, 20, 60, 0.85);
       color: #00ffff;
       padding: 10px 15px;
-      border-radius: 10px;
+      border-radius: 12px;
       font-family: "Segoe UI", sans-serif;
       font-size: 14px;
-      box-shadow: 0 0 10px rgba(0,255,255,0.5);
+      box-shadow: 0 0 12px rgba(0, 255, 255, 0.4);
+      backdrop-filter: blur(6px);
+      transition: all 0.3s ease;
+    }
+
+    #info b {
+      color: #7df9ff;
     }
   </style>
 </head>
 <body>
 
   <div id="map"></div>
-  <div id="info">🛰 Menunggu data GPS...</div>
+  <div id="info">🛰 Inisialisasi lokasi awal...</div>
 
   <script>
-    // ======================================
-    // KONFIGURASI MQTT HIVEMQ CLOUD
-    // ======================================
+    // ===========================
+    // Konfigurasi MQTT HiveMQ
+    // ===========================
     const brokerURL = "wss://f89f938116df4dee81d5215df5ba4782.s1.eu.hivemq.cloud:8884/mqtt";
     const options = {
       username: "intelligent",
@@ -65,27 +68,42 @@
       connectTimeout: 4000
     };
 
-    // ======================================
-    // INISIALISASI PETA LEAFLET (OPENSTREETMAP)
-    // ======================================
-    let map = L.map("map").setView([-7.6256, 111.528], 15);
+    // ===========================
+    // Lokasi default (idle)
+    // ===========================
+    const idleLat = -7.6476625;
+    const idleLon = 111.5219402;
+    const idleZoom = 16;
+
+    // Ambil lokasi terakhir dari localStorage (jika ada)
+    let savedLocation = JSON.parse(localStorage.getItem("lastLocation")) || {
+      lat: idleLat,
+      lon: idleLon,
+      zoom: idleZoom
+    };
+
+    // ===========================
+    // Inisialisasi Peta
+    // ===========================
+    let map = L.map("map").setView([savedLocation.lat, savedLocation.lon], savedLocation.zoom);
+
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       attribution: '&copy; <a href="https://www.openstreetmap.org/">OpenStreetMap</a>'
     }).addTo(map);
 
-    let marker = L.marker([-7.6256, 111.528]).addTo(map);
+    let marker = L.marker([savedLocation.lat, savedLocation.lon]).addTo(map);
     let infoBox = document.getElementById("info");
 
-    // ======================================
-    // KONEKSI MQTT
-    // ======================================
+    // ===========================
+    // Koneksi ke MQTT Broker
+    // ===========================
     const client = mqtt.connect(brokerURL, options);
 
     client.on("connect", () => {
       console.log("✅ Terhubung ke HiveMQ Cloud");
       infoBox.innerHTML = "✅ MQTT Connected<br>Menunggu data GPS...";
-      client.subscribe("maps"); // sesuai program ESP32
+      client.subscribe("maps");
     });
 
     client.on("error", (err) => {
@@ -97,12 +115,18 @@
       infoBox.innerHTML = "🔄 Reconnecting MQTT...";
     });
 
-    // ======================================
-    // UPDATE POSISI DARI DATA MQTT
-    // ======================================
+    // ===========================
+    // Update Lokasi dari MQTT
+    // ===========================
     client.on("message", (topic, message) => {
       const payload = message.toString().trim();
       console.log("📩 Data diterima:", payload);
+
+      // Cegah update jika payload kosong, null, atau tidak mengandung q=
+      if (!payload || payload === "null" || !payload.includes("q=")) {
+        console.warn("⚠ Payload kosong atau tidak valid, abaikan.");
+        return;
+      }
 
       // Format payload: https://maps.google.com/?q=-7.62551,111.52790
       const match = payload.match(/q=(-?\d+\.\d+),(-?\d+\.\d+)/);
@@ -114,15 +138,40 @@
       const lat = parseFloat(match[1]);
       const lon = parseFloat(match[2]);
 
-      // Update posisi marker dan peta
-      marker.setLatLng([lat, lon]);
-      map.setView([lat, lon], 17, { animate: true });
+      // Jika lokasi 0,0 → abaikan (data tidak valid)
+      if (lat === 0 && lon === 0) {
+        console.warn("⚠ Koordinat (0,0) diabaikan.");
+        return;
+      }
 
+      // Simpan ke localStorage hanya jika data valid
+      localStorage.setItem("lastLocation", JSON.stringify({ lat, lon, zoom: 17 }));
+
+      // Update marker dan map
+      marker.setLatLng([lat, lon]);
+      map.flyTo([lat, lon], 17, { animate: true, duration: 1.5 });
+
+      // Update info
       infoBox.innerHTML = `
         📡 <b>Live GPS</b><br>
         Lat: <b>${lat.toFixed(6)}</b><br>
         Lon: <b>${lon.toFixed(6)}</b><br>
-        Time: ${new Date().toLocaleTimeString()}
+        <a href="https://maps.google.com/?q=${lat},${lon}" target="_blank" style="color:#7df9ff;">🌍 Lihat di Google Maps</a><br>
+        <small>🕒 ${new Date().toLocaleTimeString()}</small>
+      `;
+    });
+
+    // ===========================
+    // Saat tidak ada data MQTT, tampilkan lokasi terakhir
+    // ===========================
+    window.addEventListener("load", () => {
+      const { lat, lon } = savedLocation;
+      infoBox.innerHTML = `
+        📡 <b>Last Known GPS</b><br>
+        Lat: <b>${lat.toFixed(6)}</b><br>
+        Lon: <b>${lon.toFixed(6)}</b><br>
+        <a href="https://maps.google.com/?q=${lat},${lon}" target="_blank" style="color:#7df9ff;">🌍 Lihat di Google Maps</a><br>
+        <small>🕒 ${new Date().toLocaleTimeString()}</small>
       `;
     });
   </script>
